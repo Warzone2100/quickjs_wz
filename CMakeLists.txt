@@ -1,5 +1,5 @@
-cmake_minimum_required(VERSION 3.5...3.14)
-project (quickjs C)
+cmake_minimum_required(VERSION 3.10...3.24)
+project (quickjs-wz C)
 
 if(${CMAKE_VERSION} VERSION_LESS 3.12)
 	cmake_policy(VERSION ${CMAKE_MAJOR_VERSION}.${CMAKE_MINOR_VERSION})
@@ -14,130 +14,133 @@ set(CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 ##################
 # QuickJS library
 
+# For now, avoid including the quickjs-ng CMake configuration directly, and explicitly specify our own
+# add_subdirectory(quickjs-ng)
+
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS ON)
+set(CMAKE_C_STANDARD 11)
+
 set(QUICKJS_HEADERS
-	cutils.h
-	libbf.h
-	libregexp.h
-	libunicode.h
-	list.h
-	quickjs.h
+	quickjs-ng/cutils.h
+	quickjs-ng/libbf.h
+	quickjs-ng/libregexp.h
+	quickjs-ng/libunicode.h
+	quickjs-ng/list.h
+	quickjs-ng/quickjs.h
 	# extensions
-	quickjs-debugger.h
-	quickjs-limitedcontext.h
+	quickjs-wz-extensions/quickjs-debugger.h
+	quickjs-wz-extensions/quickjs-limitedcontext.h
 )
 
 set(QUICKJS_SOURCES
-	cutils.c
-	libbf.c
-	libregexp.c
-	libunicode.c
-	quickjs.c
+	quickjs-ng/cutils.c
+	quickjs-ng/libbf.c
+	quickjs-ng/libregexp.c
+	quickjs-ng/libunicode.c
+	quickjs-ng/quickjs.c
 	# extensions
-	# INCLUDED DIRECTLY IN QUICKJS.C: quickjs-debugger.c
-	# INCLUDED DIRECTLY IN QUICKJS.C: quickjs-limitedcontext.c
+	# INCLUDED DIRECTLY IN QUICKJS.C: quickjs-wz-extensions/quickjs-debugger.c
+	# INCLUDED DIRECTLY IN QUICKJS.C: quickjs-wz-extensions/quickjs-limitedcontext.c
 )
 
-file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION.txt" QUICKJS_VERSION_STR)
+list(APPEND qjs_defines _GNU_SOURCE)
+list(APPEND qjs_defines QJS_DISABLE_ATOMICS)
+if(WIN32)
+    list(APPEND qjs_defines WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0601)
+endif()
 
-include(CheckIncludeFiles)
-CHECK_INCLUDE_FILES("sys/time.h" HAVE_SYS_TIME_H LANGUAGE C)
-include(CheckSymbolExists)
-check_symbol_exists(bswap16 "stdlib.h" HAVE_BSWAP16)
-check_symbol_exists(bswap32 "stdlib.h" HAVE_BSWAP32)
-check_symbol_exists(bswap64 "stdlib.h" HAVE_BSWAP64)
-
-add_library(quickjs STATIC ${QUICKJS_HEADERS} ${QUICKJS_SOURCES})
-target_include_directories(quickjs PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
-target_compile_definitions(quickjs PRIVATE
-	CONFIG_VERSION="${QUICKJS_VERSION_STR}"
-	_GNU_SOURCE
-	QUICKJS_DISABLE_ATOMICS
+add_library(qjs STATIC ${QUICKJS_HEADERS} ${QUICKJS_SOURCES})
+target_compile_definitions(qjs PRIVATE ${qjs_defines})
+target_include_directories(qjs PUBLIC
+	${CMAKE_CURRENT_SOURCE_DIR}/quickjs-ng
+	${CMAKE_CURRENT_SOURCE_DIR}/quickjs-wz-extensions
 )
-if(HAVE_SYS_TIME_H)
-	target_compile_definitions(quickjs PRIVATE QUICKJS_HAVE_SYS_TIME_H)
-endif()
-if(HAVE_BSWAP16)
-	target_compile_definitions(quickjs PRIVATE HAVE_BSWAP16)
-endif()
-if(HAVE_BSWAP32)
-	target_compile_definitions(quickjs PRIVATE HAVE_BSWAP32)
-endif()
-if(HAVE_BSWAP64)
-	target_compile_definitions(quickjs PRIVATE HAVE_BSWAP64)
-endif()
+
 set(CMAKE_THREAD_PREFER_PTHREAD TRUE)
 set(THREADS_PREFER_PTHREAD_FLAG TRUE)
 find_package(Threads REQUIRED)
-target_link_libraries(quickjs PRIVATE Threads::Threads)
+target_link_libraries(qjs PRIVATE Threads::Threads)
 
 if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
 	# GCC 9.3.0+ has been tested to be fine at -O2
 	if((CMAKE_C_COMPILER_VERSION VERSION_LESS 9.3) AND (CMAKE_C_COMPILER_VERSION VERSION_GREATER 7.0))
 		# Avoid SEGFAULT with earlier GCC and fcode-hoisting
 		message(STATUS "QuickJS: Using -fno-code-hoisting (${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION})")
-		target_compile_options(quickjs PRIVATE -fno-code-hoisting)
+		target_compile_options(qjs PRIVATE -fno-code-hoisting)
 	endif()
 endif()
 
-include(CheckCompilerFlagsOutput)
+# Alias the quickjs-ng "qjs" library name to the previous library name that WZ used
+add_library(quickjs ALIAS qjs)
+
+include(CheckCCompilerFlag)
+
+macro(xcheck_add_c_compiler_flag FLAG)
+    string(REPLACE "-" "" FLAG_NO_HYPHEN ${FLAG})
+    check_c_compiler_flag(${FLAG} COMPILER_SUPPORTS_${FLAG_NO_HYPHEN})
+    if(COMPILER_SUPPORTS_${FLAG_NO_HYPHEN})
+		message(STATUS "Adding compile option: ${FLAG}")
+		target_compile_options(qjs PRIVATE ${FLAG})
+    endif()
+endmacro()
+
+xcheck_add_c_compiler_flag(-Wall)
+xcheck_add_c_compiler_flag(-Wformat=2)
+xcheck_add_c_compiler_flag(-funsigned-char)
+
 if(MSVC)
 	# Disable some warnings for QuickJS
-	set(QUICKJS_COMPILE_OPTIONS "")
 
-	# warning C4018: '<': signed/unsigned mismatch
-	set(QUICKJS_COMPILE_OPTIONS ${QUICKJS_COMPILE_OPTIONS} /wd4018)
+	xcheck_add_c_compiler_flag(/wd4018) # -Wno-sign-conversion
+    xcheck_add_c_compiler_flag(/wd4061) # -Wno-implicit-fallthrough
+    xcheck_add_c_compiler_flag(/wd4100) # -Wno-unused-parameter
+    xcheck_add_c_compiler_flag(/wd4200) # -Wno-zero-length-array
+    xcheck_add_c_compiler_flag(/wd4242) # -Wno-shorten-64-to-32
+    xcheck_add_c_compiler_flag(/wd4244) # -Wno-shorten-64-to-32
+    xcheck_add_c_compiler_flag(/wd4245) # -Wno-sign-compare
+    xcheck_add_c_compiler_flag(/wd4267) # -Wno-shorten-64-to-32
+    xcheck_add_c_compiler_flag(/wd4388) # -Wno-sign-compare
+    xcheck_add_c_compiler_flag(/wd4389) # -Wno-sign-compare
+    xcheck_add_c_compiler_flag(/wd4710) # Function not inlined
+    xcheck_add_c_compiler_flag(/wd4711) # Function was inlined
+    xcheck_add_c_compiler_flag(/wd4820) # Padding added after construct
+    xcheck_add_c_compiler_flag(/wd4996) # -Wdeprecated-declarations
+    xcheck_add_c_compiler_flag(/wd5045) # Compiler will insert Spectre mitigation for memory load if /Qspectre switch specified
 
-	# warning C4146: unary minus operator applied to unsigned type, result still unsigned
-	set(QUICKJS_COMPILE_OPTIONS ${QUICKJS_COMPILE_OPTIONS} /wd4146)
+	xcheck_add_c_compiler_flag(/wd4146) # warning C4146: unary minus operator applied to unsigned type, result still unsigned
+	xcheck_add_c_compiler_flag(/wd4456) # warning C4456: declaration of 'var' hides previous local declaration
+	xcheck_add_c_compiler_flag(/wd4457) # warning C4457: declaration of 'var' hides function parameter
 
-	# warning C4191: 'type cast': unsafe conversion from 'JSCFunctionMagic (__cdecl *)' to 'JSCFunction (__cdecl *)'
-	set(QUICKJS_COMPILE_OPTIONS ${QUICKJS_COMPILE_OPTIONS} /wd4191)
+	# warning C4464: relative include path contains '..'
+	# (caused by the WZ extension includes at the end of quickjs.c)
+	xcheck_add_c_compiler_flag(/wd4464)
 
-	# warning C4244: 'conversion' conversion from 'type1' to 'type2', possible loss of data
-	set(QUICKJS_COMPILE_OPTIONS ${QUICKJS_COMPILE_OPTIONS} /wd4244)
-
-	# warning C4267: 'var' : conversion from 'size_t' to 'type', possible loss of data
-	set(QUICKJS_COMPILE_OPTIONS ${QUICKJS_COMPILE_OPTIONS} /wd4267)
-
-	# warning C4334: 'operator' : result of 32-bit shift implicitly converted to 64 bits (was 64-bit shift intended?)
-	set(QUICKJS_COMPILE_OPTIONS ${QUICKJS_COMPILE_OPTIONS} /wd4334)
-
-	target_compile_options(quickjs PRIVATE ${QUICKJS_COMPILE_OPTIONS})
-	target_compile_definitions(quickjs PRIVATE "_CRT_SECURE_NO_WARNINGS")
+	xcheck_add_c_compiler_flag(/wd4702) # warning C4702: unreachable code
+	xcheck_add_c_compiler_flag(/wd4334) # warning C4334: 'operator' : result of 32-bit shift implicitly converted to 64 bits (was 64-bit shift intended?)
 else()
 	# Disable some warnings from QuickJS
 
-	set(_supported_quickjs_c_compiler_flags "")
+	xcheck_add_c_compiler_flag(-Wno-implicit-fallthrough)
+	xcheck_add_c_compiler_flag(-Wno-sign-compare)
+	xcheck_add_c_compiler_flag(-Wno-missing-field-initializers)
+	xcheck_add_c_compiler_flag(-Wno-unused-parameter)
+	xcheck_add_c_compiler_flag(-Wno-unused-result)
+	xcheck_add_c_compiler_flag(-Wno-stringop-truncation)
+	xcheck_add_c_compiler_flag(-Wno-array-bounds)
 
-	# -Wcast-align				(GCC 3.4+, Clang 3.2+)
-	check_compiler_flags_output("-Werror -Wno-cast-align -Wno-error=cpp" COMPILER_TYPE C   OUTPUT_FLAGS "-Wno-cast-align" OUTPUT_VARIABLE _supported_quickjs_c_compiler_flags APPEND)
+	xcheck_add_c_compiler_flag(-Wno-cast-align) # -Wcast-align (GCC 3.4+, Clang 3.2+)
+	xcheck_add_c_compiler_flag(-Wno-shadow) # -Wshadow (GCC 3.4+, Clang 3.2+)
+	xcheck_add_c_compiler_flag(-Wno-implicit-int-float-conversion) # -Wimplicit-int-float-conversion (Clang)
+	xcheck_add_c_compiler_flag(-Wno-implicit-const-int-float-conversion) # -Wimplicit-const-int-float-conversion (Clang)
+	xcheck_add_c_compiler_flag(-Wno-unused-variable)
+	xcheck_add_c_compiler_flag(-Wno-unused-but-set-variable)
+	xcheck_add_c_compiler_flag(-Wno-conditional-uninitialized)
+	xcheck_add_c_compiler_flag(-Wno-comma)
+	xcheck_add_c_compiler_flag(-Wno-assign-enum)
+	xcheck_add_c_compiler_flag(-Wno-maybe-uninitialized)
 
-	# -Wshadow					(GCC 3.4+, Clang 3.2+)
-	check_compiler_flags_output("-Werror -Wno-shadow -Wno-error=cpp" COMPILER_TYPE C   OUTPUT_FLAGS "-Wno-shadow" OUTPUT_VARIABLE _supported_quickjs_c_compiler_flags APPEND)
-
-	# -Wimplicit-int-float-conversion			(Clang)
-	check_compiler_flags_output("-Werror -Wno-implicit-int-float-conversion -Wno-error=cpp" COMPILER_TYPE C   OUTPUT_FLAGS "-Wno-implicit-int-float-conversion" OUTPUT_VARIABLE _supported_quickjs_c_compiler_flags APPEND)
-
-	# -Wimplicit-const-int-float-conversion		(Clang)
-	check_compiler_flags_output("-Werror -Wno-implicit-const-int-float-conversion -Wno-error=cpp" COMPILER_TYPE C   OUTPUT_FLAGS "-Wno-implicit-const-int-float-conversion" OUTPUT_VARIABLE _supported_quickjs_c_compiler_flags APPEND)
-
-	# -Wunused-variable
-	check_compiler_flags_output("-Werror -Wno-unused-variable -Wno-error=cpp" COMPILER_TYPE C   OUTPUT_FLAGS "-Wno-unused-variable" OUTPUT_VARIABLE _supported_quickjs_c_compiler_flags APPEND)
-
-	# -Wunused-but-set-variable
-	check_compiler_flags_output("-Werror -Wno-unused-but-set-variable -Wno-error=cpp" COMPILER_TYPE C   OUTPUT_FLAGS "-Wno-unused-but-set-variable" OUTPUT_VARIABLE _supported_quickjs_c_compiler_flags APPEND)
-
-	# -Wconditional-uninitialized
-	check_compiler_flags_output("-Werror -Wno-conditional-uninitialized -Wno-error=cpp" COMPILER_TYPE C   OUTPUT_FLAGS "-Wno-conditional-uninitialized" OUTPUT_VARIABLE _supported_quickjs_c_compiler_flags APPEND)
-
-	# -Wcomma
-	check_compiler_flags_output("-Werror -Wno-comma -Wno-error=cpp" COMPILER_TYPE C   OUTPUT_FLAGS "-Wno-comma" OUTPUT_VARIABLE _supported_quickjs_c_compiler_flags APPEND)
-
-	# -Wassign-enum
-	check_compiler_flags_output("-Werror -Wno-assign-enum -Wno-error=cpp" COMPILER_TYPE C   OUTPUT_FLAGS "-Wno-assign-enum" OUTPUT_VARIABLE _supported_quickjs_c_compiler_flags APPEND)
-
-	if (NOT _supported_quickjs_c_compiler_flags STREQUAL "")
-		string(REPLACE " " ";" _supported_quickjs_c_compiler_flags "${_supported_quickjs_c_compiler_flags}")
-		target_compile_options(quickjs PRIVATE ${_supported_quickjs_c_compiler_flags})
-	endif()
+	# -Wmacro-redefined (for Mingw builds) # Only possibly needed if using quickjs-ng CMake configuration directly?
+	# xcheck_add_c_compiler_flag(-Wno-macro-redefined)
 endif()
+
